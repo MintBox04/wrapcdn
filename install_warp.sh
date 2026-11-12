@@ -53,11 +53,11 @@ fi
 
 # 4. Start D-Bus & Daemon manually (compatible with headless containers & VMs)
 echo "🚀 Initializing D-Bus and warp-svc..."
-sudo mkdir -p /run/dbus
-sudo dbus-daemon --system --fork 2>/dev/null || true
+sudo mkdir -p /run/dbus /var/lib/cloudflare-warp /etc/cloudflare-warp
+sudo dbus-daemon --system --fork 2>/dev/null || sudo service dbus start 2>/dev/null || true
 sleep 1
 
-sudo warp-svc --accept-tos > /tmp/warp-svc.log 2>&1 &
+sudo systemctl start warp-svc.service 2>/dev/null || sudo service warp-svc start 2>/dev/null || sudo warp-svc > /tmp/warp-svc.log 2>&1 &
 
 # Wait for socket
 for i in {1..15}; do
