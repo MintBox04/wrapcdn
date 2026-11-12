@@ -13,87 +13,76 @@ echo "📍 IP BEFORE WARP: $OLD_IP"
 echo "=================================================="
 
 # 1. Fallback DNS
-printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" | sudo tee -a /etc/resolv.conf >/dev/null 2>&1 || true
+echo "nameserver 1.1.1.1" | sudo tee -a /etc/resolv.conf >/dev/null 2>&1 || true
+echo "nameserver 8.8.8.8" | sudo tee -a /etc/resolv.conf >/dev/null 2>&1 || true
 
 # 2. Locate local deb package (ZERO LIVE DOWNLOADS)
 WARP_DEB=""
 if [ -s "$SCRIPT_DIR/cloudflare-warp_${DISTRO}_amd64.deb" ]; then
   WARP_DEB="$SCRIPT_DIR/cloudflare-warp_${DISTRO}_amd64.deb"
-  echo "📦 Found local deb: $WARP_DEB (Zero network download)"
 elif [ -s "$SCRIPT_DIR/cloudflare-warp.deb" ]; then
   WARP_DEB="$SCRIPT_DIR/cloudflare-warp.deb"
-  echo "📦 Found local deb: $WARP_DEB (Zero network download)"
-elif [ -s "$HOME/.apt-warp-cache/cloudflare-warp.deb" ]; then
-  WARP_DEB="$HOME/.apt-warp-cache/cloudflare-warp.deb"
-  echo "📦 Found cached deb: $WARP_DEB (Zero network download)"
 elif [ -s "/tmp/wrapcdn/cloudflare-warp_${DISTRO}_amd64.deb" ]; then
   WARP_DEB="/tmp/wrapcdn/cloudflare-warp_${DISTRO}_amd64.deb"
-  echo "📦 Found /tmp/wrapcdn deb: $WARP_DEB"
 elif [ -s "/tmp/wrapcdn/cloudflare-warp.deb" ]; then
   WARP_DEB="/tmp/wrapcdn/cloudflare-warp.deb"
-  echo "📦 Found /tmp/wrapcdn deb: $WARP_DEB"
-else
-  # Fallback: only if file not present locally
-  echo "📥 Local deb not found, downloading from wrapcdn..."
-  mkdir -p ~/.apt-warp-cache
-  WARP_DEB="$HOME/.apt-warp-cache/cloudflare-warp.deb"
-  curl -fsSL --retry 3 --connect-timeout 15 "https://raw.githubusercontent.com/MintBox04/wrapcdn/main/cloudflare-warp_${DISTRO}_amd64.deb" -o "$WARP_DEB" 2>/dev/null \
-    || curl -fsSL --retry 3 --connect-timeout 15 "https://raw.githubusercontent.com/MintBox04/wrapcdn/main/cloudflare-warp.deb" -o "$WARP_DEB" || true
 fi
+echo "📦 Using local package: $WARP_DEB"
 
-# 3. Direct install bypassing APT index & mirror dependencies
-if [ -n "$WARP_DEB" ] && [ -s "$WARP_DEB" ]; then
-  echo "📦 Installing Cloudflare WARP package from $WARP_DEB..."
-  sudo dpkg -i --force-depends "$WARP_DEB" 2>/dev/null || true
-  sudo dpkg --configure cloudflare-warp 2>/dev/null || true
-else
-  echo "⚠️ WARP deb package unavailable, continuing with runner IP..."
-  exit 0
+# 3. Direct install packages including TSS2 dependencies
+if [ -d "$SCRIPT_DIR" ]; then
+  sudo dpkg -i --force-depends "$SCRIPT_DIR"/libtss2*.deb "$WARP_DEB" 2>/dev/null || sudo dpkg -i --force-depends "$WARP_DEB" 2>/dev/null || true
+elif [ -d "/tmp/wrapcdn" ]; then
+  sudo dpkg -i --force-depends /tmp/wrapcdn/libtss2*.deb "$WARP_DEB" 2>/dev/null || sudo dpkg -i --force-depends "$WARP_DEB" 2>/dev/null || true
 fi
+sudo dpkg --configure cloudflare-warp 2>/dev/null || true
+sudo ldconfig 2>/dev/null || true
 
-# 4. Start D-Bus & Daemon manually (compatible with headless containers & VMs)
-echo "🚀 Initializing D-Bus and warp-svc..."
+# 4. Start D-Bus & Daemon manually
 sudo mkdir -p /run/dbus /var/lib/cloudflare-warp /etc/cloudflare-warp
+sudo dbus-uuidgen --ensure 2>/dev/null || true
 sudo dbus-daemon --system --fork 2>/dev/null || sudo service dbus start 2>/dev/null || true
 sleep 1
 
-sudo systemctl start warp-svc.service 2>/dev/null || sudo service warp-svc start 2>/dev/null || sudo warp-svc > /tmp/warp-svc.log 2>&1 &
+sudo systemctl start warp-svc 2>/dev/null || sudo service warp-svc start 2>/dev/null || true
+if ! pgrep -x warp-svc >/dev/null 2>&1; then
+  sudo /bin/warp-svc > /tmp/warp-svc.log 2>&1 &
+fi
 
-# Wait for socket
 for i in {1..15}; do
-  if warp-cli --accept-tos status >/dev/null 2>&1 || warp-cli status >/dev/null 2>&1; then
-    echo "✅ warp-svc is ready."
+  if pgrep -x warp-svc >/dev/null 2>&1 || warp-cli --accept-tos status 2>&1 | grep -qE "Status|Registration|Connected|Disconnected"; then
+    echo "✅ warp-svc is ready ($i/15)."
     break
   fi
-  echo "⏳ Waiting for warp-svc... ($i/15)"
   sleep 1
 done
 
-# 5. Registration & Connection
-echo "🔑 Registering client..."
-warp-cli --accept-tos registration new 2>/dev/null || warp-cli registration new 2>/dev/null || warp-cli --accept-tos register 2>/dev/null || true
-sleep 1
+if ! pgrep -x warp-svc >/dev/null 2>&1; then
+  echo "❌ warp-svc failed to start! Debug logs:"
+  cat /tmp/warp-svc.log 2>/dev/null || true
+  sudo journalctl -u warp-svc -n 20 --no-pager 2>/dev/null || true
+fi
 
-echo "🛡️ Connecting in full WARP mode..."
-warp-cli --accept-tos mode warp 2>/dev/null || warp-cli mode warp 2>/dev/null || warp-cli --accept-tos set-mode warp 2>/dev/null || true
+# 5. Registration & Connection
+warp-cli --accept-tos registration new 2>/dev/null || warp-cli registration new 2>/dev/null || warp-cli --accept-tos register 2>/dev/null || warp-cli register 2>/dev/null || true
+sleep 1
+warp-cli --accept-tos mode warp 2>/dev/null || warp-cli mode warp 2>/dev/null || warp-cli --accept-tos set-mode warp 2>/dev/null || warp-cli set-mode warp 2>/dev/null || true
 warp-cli --accept-tos connect 2>/dev/null || warp-cli connect 2>/dev/null || true
 
-# Wait for connection
 for i in {1..12}; do
   STATUS=$(warp-cli --accept-tos status 2>/dev/null || warp-cli status 2>/dev/null || echo "")
   if echo "$STATUS" | grep -qi "connected"; then
     echo "✅ WARP tunnel connected successfully ($i/12)!"
     break
   fi
-  echo "⏳ Waiting for WARP tunnel... ($i/12)"
   sleep 1
 done
 
-# Fallback to proxy mode if TUN mode does not route on cloud VM
+# 6. SOCKS Proxy fallback if TUN mode doesn't route on Azure VM
 NEW_IP=$(curl -s --connect-timeout 5 https://api.ipify.org || echo "")
 if [ -z "$NEW_IP" ] || [ "$NEW_IP" = "$OLD_IP" ]; then
   echo "⚠️ TUN mode not routing, switching to WARP SOCKS proxy mode..."
-  warp-cli --accept-tos mode proxy 2>/dev/null || warp-cli mode proxy 2>/dev/null || true
+  warp-cli --accept-tos mode proxy 2>/dev/null || warp-cli mode proxy 2>/dev/null || warp-cli --accept-tos set-mode proxy 2>/dev/null || warp-cli set-mode proxy 2>/dev/null || true
   warp-cli --accept-tos connect 2>/dev/null || warp-cli connect 2>/dev/null || true
   sleep 2
   PROXY_IP=$(curl -s --socks5 127.0.0.1:40000 --connect-timeout 5 https://api.ipify.org || echo "")
@@ -104,9 +93,15 @@ if [ -z "$NEW_IP" ] || [ "$NEW_IP" = "$OLD_IP" ]; then
       echo "HTTPS_PROXY=socks5://127.0.0.1:40000" >> "$GITHUB_ENV"
       echo "ALL_PROXY=socks5://127.0.0.1:40000" >> "$GITHUB_ENV"
     fi
+    export HTTP_PROXY="socks5://127.0.0.1:40000"
+    export HTTPS_PROXY="socks5://127.0.0.1:40000"
+    export ALL_PROXY="socks5://127.0.0.1:40000"
+  else
+    echo "⚠️ SOCKS5 proxy check: PROXY_IP='$PROXY_IP'"
   fi
 fi
 
+FINAL_IP=$(curl -s --connect-timeout 5 https://api.ipify.org || curl -s https://ifconfig.me || echo "$OLD_IP")
 echo "=================================================="
-echo "🚀 IP AFTER WARP: $(curl -s https://api.ipify.org || curl -s https://ifconfig.me || echo 'Unknown')"
+echo "🚀 IP AFTER WARP: $FINAL_IP"
 echo "=================================================="
