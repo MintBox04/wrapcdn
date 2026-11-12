@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
+# ==============================================================================
+# Cloudflare WARP Fast Installer (Zero Live Downloads - Uses Local Repo Files)
+# ==============================================================================
 set -euo pipefail
 
-CDN_BASE_URL="${WARP_CDN_URL:-https://raw.githubusercontent.com/MintBox04/wrapcdn/main}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DISTRO=$(lsb_release -cs 2>/dev/null || echo "jammy")
 
 echo "=================================================="
 OLD_IP=$(curl -s --connect-timeout 5 https://api.ipify.org || curl -s https://ifconfig.me || echo 'Unknown')
@@ -11,24 +15,39 @@ echo "=================================================="
 # 1. Fallback DNS
 printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" | sudo tee -a /etc/resolv.conf >/dev/null 2>&1 || true
 
-# 2. Download deb directly from user CDN
-mkdir -p ~/.apt-warp-cache
-WARP_DEB="$HOME/.apt-warp-cache/cloudflare-warp.deb"
-
-if [ ! -s "$WARP_DEB" ]; then
-  DISTRO=$(lsb_release -cs 2>/dev/null || echo "jammy")
-  echo "📥 Downloading WARP deb for $DISTRO from custom CDN..."
-  curl -fsSL --retry 3 --connect-timeout 15 "${CDN_BASE_URL}/cloudflare-warp_${DISTRO}_amd64.deb" -o "$WARP_DEB" 2>/dev/null \
-    || curl -fsSL --retry 3 --connect-timeout 15 "${CDN_BASE_URL}/cloudflare-warp.deb" -o "$WARP_DEB" || true
+# 2. Locate local deb package (ZERO LIVE DOWNLOADS)
+WARP_DEB=""
+if [ -s "$SCRIPT_DIR/cloudflare-warp_${DISTRO}_amd64.deb" ]; then
+  WARP_DEB="$SCRIPT_DIR/cloudflare-warp_${DISTRO}_amd64.deb"
+  echo "📦 Found local deb: $WARP_DEB (Zero network download)"
+elif [ -s "$SCRIPT_DIR/cloudflare-warp.deb" ]; then
+  WARP_DEB="$SCRIPT_DIR/cloudflare-warp.deb"
+  echo "📦 Found local deb: $WARP_DEB (Zero network download)"
+elif [ -s "$HOME/.apt-warp-cache/cloudflare-warp.deb" ]; then
+  WARP_DEB="$HOME/.apt-warp-cache/cloudflare-warp.deb"
+  echo "📦 Found cached deb: $WARP_DEB (Zero network download)"
+elif [ -s "/tmp/wrapcdn/cloudflare-warp_${DISTRO}_amd64.deb" ]; then
+  WARP_DEB="/tmp/wrapcdn/cloudflare-warp_${DISTRO}_amd64.deb"
+  echo "📦 Found /tmp/wrapcdn deb: $WARP_DEB"
+elif [ -s "/tmp/wrapcdn/cloudflare-warp.deb" ]; then
+  WARP_DEB="/tmp/wrapcdn/cloudflare-warp.deb"
+  echo "📦 Found /tmp/wrapcdn deb: $WARP_DEB"
+else
+  # Fallback: only if file not present locally
+  echo "📥 Local deb not found, downloading from wrapcdn..."
+  mkdir -p ~/.apt-warp-cache
+  WARP_DEB="$HOME/.apt-warp-cache/cloudflare-warp.deb"
+  curl -fsSL --retry 3 --connect-timeout 15 "https://raw.githubusercontent.com/MintBox04/wrapcdn/main/cloudflare-warp_${DISTRO}_amd64.deb" -o "$WARP_DEB" 2>/dev/null \
+    || curl -fsSL --retry 3 --connect-timeout 15 "https://raw.githubusercontent.com/MintBox04/wrapcdn/main/cloudflare-warp.deb" -o "$WARP_DEB" || true
 fi
 
 # 3. Direct install bypassing APT index & mirror dependencies
-if [ -s "$WARP_DEB" ]; then
-  echo "📦 Installing Cloudflare WARP package..."
+if [ -n "$WARP_DEB" ] && [ -s "$WARP_DEB" ]; then
+  echo "📦 Installing Cloudflare WARP package from $WARP_DEB..."
   sudo dpkg -i --force-depends "$WARP_DEB" 2>/dev/null || true
   sudo dpkg --configure cloudflare-warp 2>/dev/null || true
 else
-  echo "⚠️ WARP deb package unavailable, skipping..."
+  echo "⚠️ WARP deb package unavailable, continuing with runner IP..."
   exit 0
 fi
 
